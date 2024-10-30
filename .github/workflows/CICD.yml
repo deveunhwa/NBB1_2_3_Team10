@@ -1,21 +1,13 @@
-# This workflow uses actions that are not certified by GitHub.
-# They are provided by a third-party and are governed by
-# separate terms of service, privacy policy, and support
-# documentation.
-# This workflow will build a Java project with Gradle and cache/restore any dependencies to improve the workflow execution time
-# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-java-with-gradle
-
-name: Java CI with Gradle
+name: Java & React CI/CD
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "release" ]
   pull_request:
     branches: [ "main" ]
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -28,40 +20,81 @@ jobs:
         java-version: '17'
         distribution: 'temurin'
 
-    # Configure Gradle for optimal use in GitHub Actions, including caching of downloaded dependencies.
-    # See: https://github.com/gradle/actions/blob/main/setup-gradle/README.md
+    # application-prod.properties 암호화
+    - name: add secrets into properties
+      run: |
+        echo "${{ secrets.APPLICATION_PROD }}" | base64 --decode >> ./src/main/resources/application-prod.properties
+
+    # 백엔드
+    # 환경 설정
     - name: Setup Gradle
-      uses: gradle/actions/setup-gradle@af1da67850ed9a4cedd57bfd976089dd991e2582 # v4.0.0
+      uses: gradle/actions/setup-gradle@af1da67850ed9a4cedd57bfd976089dd991e2582
 
+    # 실행 권한 부여
+    - name: Grant execute permission for Gradlew
+      run: chmod +x gradlew
+
+    # 프로젝트 빌드 (clean bootJar로 빌드만 수행)
     - name: Build with Gradle Wrapper
-      run: ./gradlew build
+      run: ./gradlew clean bootJar -Dspring.profiles.active=prod
 
-    # NOTE: The Gradle Wrapper is the default and recommended way to run Gradle (https://docs.gradle.org/current/userguide/gradle_wrapper.html).
-    # If your project does not have the Gradle Wrapper configured, you can use the following configuration to run Gradle with a specified version.
-    #
-    # - name: Setup Gradle
-    #   uses: gradle/actions/setup-gradle@af1da67850ed9a4cedd57bfd976089dd991e2582 # v4.0.0
-    #   with:
-    #     gradle-version: '8.9'
-    #
-    # - name: Build with Gradle 8.9
-    #   run: gradle build
+    # 프론트엔드
+    # Node.js 환경 설정
+    - name: Set up Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '16' # 리액트 프로젝트에 맞는 Node.js 버전 지정
 
-  dependency-submission:
+    # 의존성 설치
+    - name: Install Dependencies
+      run: npm install
+      working-directory: ./frontend
 
+    # 리액트 빌드
+    - name: Build React App
+      run: npm run build
+      working-directory: ./frontend
+  deploy:
+    if: github.ref == 'refs/heads/release' # release 브랜치에만 배포 수행
+    needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
 
     steps:
-    - uses: actions/checkout@v4
-    - name: Set up JDK 17
-      uses: actions/setup-java@v4
-      with:
-        java-version: '17'
-        distribution: 'temurin'
+      - uses: actions/checkout@v4
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
 
-    # Generates and submits a dependency graph, enabling Dependabot Alerts for all project dependencies.
-    # See: https://github.com/gradle/actions/blob/main/dependency-submission/README.md
-    - name: Generate and submit dependency graph
-      uses: gradle/actions/dependency-submission@af1da67850ed9a4cedd57bfd976089dd991e2582 # v4.0.0
+      # Docker Hub 로그인
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      # Docker 이미지 빌드 및 푸시
+      - name: Build and push Docker image
+        run: |
+          docker build -t ${{ secrets.DOCKER_USERNAME }}/bitta-kotlin:latest .
+          docker push ${{ secrets.DOCKER_USERNAME }}/bitta-kotlin:latest
+
+      # EC2 서버 배포
+      - name: Deploy to EC2
+        uses: appleboy/ssh-action@v0.1.6
+        with:
+         host: ${{ secrets.EC2_HOST }}
+         username: ${{ secrets.EC2_USER }}
+         key: ${{ secrets.EC2_SSH_KEY }}
+         script: |
+           # Docker 로그인
+           echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
+           
+           # 최신 Docker 이미지 가져와서 컨테이너 실행
+            docker pull ${{ secrets.DOCKER_USERNAME }}/bitta-kotlin:latest
+            docker stop my-container || true
+            docker rm my-container || true
+            docker run -d --name my-container -p 80:80 ${{ secrets.DOCKER_USERNAME }}/bitta-kotlin:latest
